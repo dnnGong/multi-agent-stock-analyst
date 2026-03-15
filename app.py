@@ -162,20 +162,6 @@ def get_tickers_by_sector(sector: str) -> dict:
         conn.close()
 
 
-def _rule_based_specialist_hints(question: str) -> set[str]:
-    text = (question or "").lower()
-    selected: set[str] = set()
-
-    if any(k in text for k in ["return", "performance", "top", "best", "worst", "gain", "loser", "price"]):
-        selected.add("MarketData")
-    if any(k in text for k in ["p/e", "pe ratio", "market cap", "valuation", "sector", "industry", "database"]):
-        selected.add("Fundamentals")
-    if any(k in text for k in ["sentiment", "news", "headline", "mood"]):
-        selected.add("Sentiment")
-
-    return selected
-
-
 ALL_TOOL_FUNCTIONS = {
     "get_tickers_by_sector": get_tickers_by_sector,
     "get_price_performance": get_price_performance,
@@ -373,27 +359,11 @@ def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
         },
     }
 
-    # Orchestrator picks specialists and decomposes into specialist-specific tasks.
+    # Orchestrator chooses domain specialists (no critic stage).
     orch_prompt = f"""
-Analyze this user question and produce a JSON plan.
-
-Question:
-{question}
-
-Return ONLY valid JSON with this schema:
-{{
-  "selected_specialists": ["Fundamentals" | "MarketData" | "Sentiment", ...],
-  "tasks": {{
-    "Fundamentals": "specialist-specific subtask",
-    "MarketData": "specialist-specific subtask",
-    "Sentiment": "specialist-specific subtask"
-  }}
-}}
-
-Rules:
-- Only include specialists that are truly needed.
-- Keep subtasks short, concrete, and data-first.
-- If no specialist is clearly needed, default to ["MarketData"].
+Analyze the user question: "{question}"
+Which specialists are needed? Respond ONLY with a comma-separated list of categories:
+'Fundamentals', 'MarketData', 'Sentiment'.
 """
     orch_res = client.chat.completions.create(
         model=model,
@@ -402,40 +372,57 @@ Rules:
             {"role": "user", "content": orch_prompt},
         ],
         temperature=0,
-        response_format={"type": "json_object"},
     )
-    plan_text = orch_res.choices[0].message.content or "{}"
-    try:
-        plan = json.loads(plan_text)
-    except Exception:
-        plan = {}
-    selected = plan.get("selected_specialists", [])
-    tasks = plan.get("tasks", {})
+    decision = orch_res.choices[0].message.content or ""
 
-    if not isinstance(selected, list):
-        selected = []
-    selected = [s for s in selected if s in specialist_map]
-
-    # Hybrid routing: LLM orchestration + deterministic task-keyword fallback.
-    selected_set = set(selected)
-    selected_set.update(_rule_based_specialist_hints(question))
-    if not selected_set:
-        selected_set.add("MarketData")
-
-    priority = ["Fundamentals", "MarketData", "Sentiment"]
-    selected = [name for name in priority if name in selected_set]
-
-    for spec in selected:
-        cfg = specialist_map[spec]
-        allowed_tools = set(cfg["tools"])
-        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in allowed_tools]
-        spec_task = tasks.get(spec) if isinstance(tasks, dict) else None
-        task = str(spec_task).strip() if spec_task else question
+    if "Fundamentals" in decision:
+        cfg = specialist_map["Fundamentals"]
+        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
         res = run_specialist_agent(
             model=model,
             agent_name=cfg["agent_name"],
             system_prompt=cfg["system_prompt"],
-            task=task,
+            task=question,
+            tool_schemas=tool_schemas,
+            verbose=verbose,
+        )
+        agents_activated_results.append(res)
+
+    if "MarketData" in decision or "Market Data" in decision:
+        cfg = specialist_map["MarketData"]
+        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        res = run_specialist_agent(
+            model=model,
+            agent_name=cfg["agent_name"],
+            system_prompt=cfg["system_prompt"],
+            task=question,
+            tool_schemas=tool_schemas,
+            verbose=verbose,
+        )
+        agents_activated_results.append(res)
+
+    if "Sentiment" in decision:
+        cfg = specialist_map["Sentiment"]
+        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        res = run_specialist_agent(
+            model=model,
+            agent_name=cfg["agent_name"],
+            system_prompt=cfg["system_prompt"],
+            task=question,
+            tool_schemas=tool_schemas,
+            verbose=verbose,
+        )
+        agents_activated_results.append(res)
+
+    if not agents_activated_results:
+        # Fallback when orchestrator output is malformed or empty.
+        cfg = specialist_map["MarketData"]
+        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        res = run_specialist_agent(
+            model=model,
+            agent_name=cfg["agent_name"],
+            system_prompt=cfg["system_prompt"],
+            task=question,
             tool_schemas=tool_schemas,
             verbose=verbose,
         )
@@ -461,7 +448,7 @@ Rules:
                 "role": "user",
                 "content": (
                     f"Question: {question}\n"
-                    f"Orchestrator selected: {', '.join(selected)}\n"
+                    f"Orchestrator decision: {decision}\n"
                     f"Data retrieved:\n{all_context}"
                 ),
             },
