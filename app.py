@@ -403,7 +403,7 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
         "final_answer": synth_res.choices[0].message.content or "",
         "agent_results": agents_activated_results,
         "elapsed_sec": time.time() - start_time,
-        "architecture": "Orchestrator-Workers",
+        "architecture": "Orchestrator-Specialists",
     }
 
 
