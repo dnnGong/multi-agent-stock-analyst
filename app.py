@@ -323,12 +323,50 @@ CRITICAL INSTRUCTIONS:
 def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
     start_time = time.time()
     agents_activated_results: list[AgentResult] = []
+    specialist_map = {
+        "Fundamentals": {
+            "agent_name": "Fundamentals Specialist",
+            "system_prompt": "You are an expert in company fundamentals. Use tools to get P/E, EPS, market cap, and valuation comparisons.",
+            "tools": ["get_company_overview", "get_tickers_by_sector", "query_local_db"],
+        },
+        "MarketData": {
+            "agent_name": "Market Data Specialist",
+            "system_prompt": (
+                "You are a market data expert.\n"
+                "1. Call get_price_performance ONCE for all tickers combined when possible.\n"
+                "2. Avoid duplicate tool calls.\n"
+                "3. Report concrete numeric evidence."
+            ),
+            "tools": ["get_price_performance", "get_market_status", "get_top_gainers_losers", "query_local_db"],
+        },
+        "Sentiment": {
+            "agent_name": "Sentiment Specialist",
+            "system_prompt": "You are an expert in financial news sentiment. Summarize sentiment direction and cite article-level evidence.",
+            "tools": ["get_news_sentiment", "query_local_db"],
+        },
+    }
 
-    # Orchestrator (matches your notebook logic)
+    # Orchestrator picks specialists and decomposes into specialist-specific tasks.
     orch_prompt = f"""
-Analyze the user question: "{question}"
-Which specialists are needed? Respond ONLY with a comma-separated list of categories:
-'Fundamentals', 'MarketData', 'Sentiment'.
+Analyze this user question and produce a JSON plan.
+
+Question:
+{question}
+
+Return ONLY valid JSON with this schema:
+{{
+  "selected_specialists": ["Fundamentals" | "MarketData" | "Sentiment", ...],
+  "tasks": {{
+    "Fundamentals": "specialist-specific subtask",
+    "MarketData": "specialist-specific subtask",
+    "Sentiment": "specialist-specific subtask"
+  }}
+}}
+
+Rules:
+- Only include specialists that are truly needed.
+- Keep subtasks short, concrete, and data-first.
+- If no specialist is clearly needed, default to ["MarketData"].
 """
     orch_res = client.chat.completions.create(
         model=model,
@@ -337,50 +375,34 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
             {"role": "user", "content": orch_prompt},
         ],
         temperature=0,
+        response_format={"type": "json_object"},
     )
-    decision = orch_res.choices[0].message.content or ""
+    plan_text = orch_res.choices[0].message.content or "{}"
+    try:
+        plan = json.loads(plan_text)
+    except Exception:
+        plan = {}
+    selected = plan.get("selected_specialists", [])
+    tasks = plan.get("tasks", {})
 
-    if "Fundamentals" in decision:
-        fund_tools = [s for s in ALL_SCHEMAS if s["function"]["name"] in ["get_company_overview", "get_tickers_by_sector"]]
-        res = run_specialist_agent(
-            model,
-            "Fundamentals Specialist",
-            "You are an expert in company fundamentals. Use tools to get P/E, Market Cap, etc.",
-            question,
-            fund_tools,
-            verbose=verbose,
-        )
-        agents_activated_results.append(res)
+    if not isinstance(selected, list) or not selected:
+        selected = ["MarketData"]
+    selected = [s for s in selected if s in specialist_map]
+    if not selected:
+        selected = ["MarketData"]
 
-    if "MarketData" in decision or "Market Data" in decision:
-        mkt_tools = [
-            s
-            for s in ALL_SCHEMAS
-            if s["function"]["name"] in ["get_price_performance", "get_market_status", "get_top_gainers_losers"]
-        ]
-        mkt_prompt = """You are a Market Data expert.
-1. Call get_price_performance ONCE for all tickers combined.
-2. Once you have data, output findings immediately.
-3. DO NOT repeat calls for the same ticker.
-"""
+    for spec in selected:
+        cfg = specialist_map[spec]
+        allowed_tools = set(cfg["tools"])
+        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in allowed_tools]
+        spec_task = tasks.get(spec) if isinstance(tasks, dict) else None
+        task = str(spec_task).strip() if spec_task else question
         res = run_specialist_agent(
-            model,
-            "Market Data Specialist",
-            mkt_prompt,
-            question,
-            mkt_tools,
-            verbose=verbose,
-        )
-        agents_activated_results.append(res)
-
-    if "Sentiment" in decision:
-        sent_tools = [s for s in ALL_SCHEMAS if s["function"]["name"] == "get_news_sentiment"]
-        res = run_specialist_agent(
-            model,
-            "Sentiment Specialist",
-            "You are an expert in financial news sentiment. Analyze market mood.",
-            question,
-            sent_tools,
+            model=model,
+            agent_name=cfg["agent_name"],
+            system_prompt=cfg["system_prompt"],
+            task=task,
+            tool_schemas=tool_schemas,
             verbose=verbose,
         )
         agents_activated_results.append(res)
@@ -393,8 +415,22 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
     synth_res = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You are a senior analyst. Synthesize specialist data into a final professional response."},
-            {"role": "user", "content": f"Question: {question}\nData retrieved:\n{all_context}"},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior financial analyst. Synthesize specialist outputs into a final answer.\n"
+                    "No critic rewrite step is used in this architecture.\n"
+                    "If data is missing or uncertain, state that explicitly."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n"
+                    f"Orchestrator selected: {', '.join(selected)}\n"
+                    f"Data retrieved:\n{all_context}"
+                ),
+            },
         ],
         temperature=0,
     )
@@ -403,7 +439,7 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
         "final_answer": synth_res.choices[0].message.content or "",
         "agent_results": agents_activated_results,
         "elapsed_sec": time.time() - start_time,
-        "architecture": "Orchestrator-Workers",
+        "architecture": "Orchestrator + Domain Specialists (No Critic Rewrite)",
     }
 
 
