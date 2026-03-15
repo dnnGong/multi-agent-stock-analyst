@@ -132,27 +132,14 @@ def get_company_overview(ticker: str) -> dict:
 
 def get_tickers_by_sector(sector: str) -> dict:
     # Sector/industry ticker lookup tool
-    q = (sector or "").strip().lower()
-    synonyms = [q]
-    if "semiconductor" in q or "semi" in q or "chip" in q:
-        synonyms.extend(["semiconductor", "semiconductors", "semis", "chips"])
-
     conn = sqlite3.connect(DB_PATH)
     try:
-        # Exact sector match first.
-        query = "SELECT ticker FROM stocks WHERE LOWER(sector) = ?"
-        df = pd.read_sql_query(query, conn, params=(q,))
+        query = "SELECT ticker FROM stocks WHERE sector = ?"
+        df = pd.read_sql_query(query, conn, params=(sector,))
 
         if df.empty:
-            # Then fuzzy sector/industry match with synonyms.
-            frames = []
-            for key in [s for s in synonyms if s]:
-                fuzzy = "SELECT ticker FROM stocks WHERE LOWER(sector) LIKE ? OR LOWER(industry) LIKE ?"
-                part = pd.read_sql_query(fuzzy, conn, params=(f"%{key}%", f"%{key}%"))
-                if not part.empty:
-                    frames.append(part)
-            if frames:
-                df = pd.concat(frames, ignore_index=True).drop_duplicates()
+            query = "SELECT ticker FROM stocks WHERE industry LIKE ?"
+            df = pd.read_sql_query(query, conn, params=(f"%{sector}%",))
 
         if df.empty:
             return {"stocks": []}
@@ -336,30 +323,8 @@ CRITICAL INSTRUCTIONS:
 def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
     start_time = time.time()
     agents_activated_results: list[AgentResult] = []
-    specialist_map = {
-        "Fundamentals": {
-            "agent_name": "Fundamentals Specialist",
-            "system_prompt": "You are an expert in company fundamentals. Use tools to get P/E, EPS, market cap, and valuation comparisons.",
-            "tools": ["get_company_overview", "get_tickers_by_sector", "query_local_db"],
-        },
-        "MarketData": {
-            "agent_name": "Market Data Specialist",
-            "system_prompt": (
-                "You are a market data expert.\n"
-                "1. Call get_price_performance ONCE for all tickers combined when possible.\n"
-                "2. Avoid duplicate tool calls.\n"
-                "3. Report concrete numeric evidence."
-            ),
-            "tools": ["get_price_performance", "get_market_status", "get_top_gainers_losers", "query_local_db"],
-        },
-        "Sentiment": {
-            "agent_name": "Sentiment Specialist",
-            "system_prompt": "You are an expert in financial news sentiment. Summarize sentiment direction and cite article-level evidence.",
-            "tools": ["get_news_sentiment", "query_local_db"],
-        },
-    }
 
-    # Orchestrator chooses domain specialists (no critic stage).
+    # Orchestrator (matches your notebook logic)
     orch_prompt = f"""
 Analyze the user question: "{question}"
 Which specialists are needed? Respond ONLY with a comma-separated list of categories:
@@ -376,54 +341,46 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
     decision = orch_res.choices[0].message.content or ""
 
     if "Fundamentals" in decision:
-        cfg = specialist_map["Fundamentals"]
-        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        fund_tools = [s for s in ALL_SCHEMAS if s["function"]["name"] in ["get_company_overview", "get_tickers_by_sector"]]
         res = run_specialist_agent(
-            model=model,
-            agent_name=cfg["agent_name"],
-            system_prompt=cfg["system_prompt"],
-            task=question,
-            tool_schemas=tool_schemas,
+            model,
+            "Fundamentals Specialist",
+            "You are an expert in company fundamentals. Use tools to get P/E, Market Cap, etc.",
+            question,
+            fund_tools,
             verbose=verbose,
         )
         agents_activated_results.append(res)
 
     if "MarketData" in decision or "Market Data" in decision:
-        cfg = specialist_map["MarketData"]
-        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        mkt_tools = [
+            s
+            for s in ALL_SCHEMAS
+            if s["function"]["name"] in ["get_price_performance", "get_market_status", "get_top_gainers_losers"]
+        ]
+        mkt_prompt = """You are a Market Data expert.
+1. Call get_price_performance ONCE for all tickers combined.
+2. Once you have data, output findings immediately.
+3. DO NOT repeat calls for the same ticker.
+"""
         res = run_specialist_agent(
-            model=model,
-            agent_name=cfg["agent_name"],
-            system_prompt=cfg["system_prompt"],
-            task=question,
-            tool_schemas=tool_schemas,
+            model,
+            "Market Data Specialist",
+            mkt_prompt,
+            question,
+            mkt_tools,
             verbose=verbose,
         )
         agents_activated_results.append(res)
 
     if "Sentiment" in decision:
-        cfg = specialist_map["Sentiment"]
-        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
+        sent_tools = [s for s in ALL_SCHEMAS if s["function"]["name"] == "get_news_sentiment"]
         res = run_specialist_agent(
-            model=model,
-            agent_name=cfg["agent_name"],
-            system_prompt=cfg["system_prompt"],
-            task=question,
-            tool_schemas=tool_schemas,
-            verbose=verbose,
-        )
-        agents_activated_results.append(res)
-
-    if not agents_activated_results:
-        # Fallback when orchestrator output is malformed or empty.
-        cfg = specialist_map["MarketData"]
-        tool_schemas = [s for s in ALL_SCHEMAS if s["function"]["name"] in set(cfg["tools"])]
-        res = run_specialist_agent(
-            model=model,
-            agent_name=cfg["agent_name"],
-            system_prompt=cfg["system_prompt"],
-            task=question,
-            tool_schemas=tool_schemas,
+            model,
+            "Sentiment Specialist",
+            "You are an expert in financial news sentiment. Analyze market mood.",
+            question,
+            sent_tools,
             verbose=verbose,
         )
         agents_activated_results.append(res)
@@ -436,22 +393,8 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
     synth_res = client.chat.completions.create(
         model=model,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a senior financial analyst. Synthesize specialist outputs into a final answer.\n"
-                    "No critic rewrite step is used in this architecture.\n"
-                    "If data is missing or uncertain, state that explicitly."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Question: {question}\n"
-                    f"Orchestrator decision: {decision}\n"
-                    f"Data retrieved:\n{all_context}"
-                ),
-            },
+            {"role": "system", "content": "You are a senior analyst. Synthesize specialist data into a final professional response."},
+            {"role": "user", "content": f"Question: {question}\nData retrieved:\n{all_context}"},
         ],
         temperature=0,
     )
@@ -460,7 +403,7 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
         "final_answer": synth_res.choices[0].message.content or "",
         "agent_results": agents_activated_results,
         "elapsed_sec": time.time() - start_time,
-        "architecture": "Orchestrator + Domain Specialists (No Critic Rewrite)",
+        "architecture": "Orchestrator-Workers",
     }
 
 
@@ -469,7 +412,7 @@ Which specialists are needed? Respond ONLY with a comma-separated list of catego
 # ==============================
 st.set_page_config(page_title="MP3 Deployment App", page_icon="💬", layout="wide")
 st.title("💬 MP3 Agent Chat")
-st.caption("Streamlit interface")
+st.caption("Streamlit interface wrapping your notebook agents")
 
 st.sidebar.header("Controls")
 agent_selector = st.sidebar.selectbox("Agent selector", ["Single Agent", "Multi-Agent"], index=1)
