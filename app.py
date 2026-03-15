@@ -448,7 +448,7 @@ Rules:
 # ==============================
 st.set_page_config(page_title="MP3 Deployment App", page_icon="💬", layout="wide")
 st.title("💬 MP3 Agent Chat")
-st.caption("Streamlit interface wrapping your notebook agents")
+st.caption("Streamlit interface")
 
 st.sidebar.header("Controls")
 agent_selector = st.sidebar.selectbox("Agent selector", ["Single Agent", "Multi-Agent"], index=1)
