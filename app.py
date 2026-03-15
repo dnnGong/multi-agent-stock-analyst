@@ -132,14 +132,27 @@ def get_company_overview(ticker: str) -> dict:
 
 def get_tickers_by_sector(sector: str) -> dict:
     # Sector/industry ticker lookup tool
+    q = (sector or "").strip().lower()
+    synonyms = [q]
+    if "semiconductor" in q or "semi" in q or "chip" in q:
+        synonyms.extend(["semiconductor", "semiconductors", "semis", "chips"])
+
     conn = sqlite3.connect(DB_PATH)
     try:
-        query = "SELECT ticker FROM stocks WHERE sector = ?"
-        df = pd.read_sql_query(query, conn, params=(sector,))
+        # Exact sector match first.
+        query = "SELECT ticker FROM stocks WHERE LOWER(sector) = ?"
+        df = pd.read_sql_query(query, conn, params=(q,))
 
         if df.empty:
-            query = "SELECT ticker FROM stocks WHERE industry LIKE ?"
-            df = pd.read_sql_query(query, conn, params=(f"%{sector}%",))
+            # Then fuzzy sector/industry match with synonyms.
+            frames = []
+            for key in [s for s in synonyms if s]:
+                fuzzy = "SELECT ticker FROM stocks WHERE LOWER(sector) LIKE ? OR LOWER(industry) LIKE ?"
+                part = pd.read_sql_query(fuzzy, conn, params=(f"%{key}%", f"%{key}%"))
+                if not part.empty:
+                    frames.append(part)
+            if frames:
+                df = pd.concat(frames, ignore_index=True).drop_duplicates()
 
         if df.empty:
             return {"stocks": []}
@@ -147,6 +160,20 @@ def get_tickers_by_sector(sector: str) -> dict:
         return {"stocks": df["ticker"].tolist()}
     finally:
         conn.close()
+
+
+def _rule_based_specialist_hints(question: str) -> set[str]:
+    text = (question or "").lower()
+    selected: set[str] = set()
+
+    if any(k in text for k in ["return", "performance", "top", "best", "worst", "gain", "loser", "price"]):
+        selected.add("MarketData")
+    if any(k in text for k in ["p/e", "pe ratio", "market cap", "valuation", "sector", "industry", "database"]):
+        selected.add("Fundamentals")
+    if any(k in text for k in ["sentiment", "news", "headline", "mood"]):
+        selected.add("Sentiment")
+
+    return selected
 
 
 ALL_TOOL_FUNCTIONS = {
@@ -385,11 +412,18 @@ Rules:
     selected = plan.get("selected_specialists", [])
     tasks = plan.get("tasks", {})
 
-    if not isinstance(selected, list) or not selected:
-        selected = ["MarketData"]
+    if not isinstance(selected, list):
+        selected = []
     selected = [s for s in selected if s in specialist_map]
-    if not selected:
-        selected = ["MarketData"]
+
+    # Hybrid routing: LLM orchestration + deterministic task-keyword fallback.
+    selected_set = set(selected)
+    selected_set.update(_rule_based_specialist_hints(question))
+    if not selected_set:
+        selected_set.add("MarketData")
+
+    priority = ["Fundamentals", "MarketData", "Sentiment"]
+    selected = [name for name in priority if name in selected_set]
 
     for spec in selected:
         cfg = specialist_map[spec]
