@@ -325,11 +325,20 @@ def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
     agents_activated_results: list[AgentResult] = []
 
     # Orchestrator (matches your notebook logic)
+#     orch_prompt = f"""
+# Analyze the user question: "{question}"
+# Which specialists are needed? Respond ONLY with a comma-separated list of categories:
+# 'Fundamentals', 'MarketData', 'Sentiment'.
+# """
     orch_prompt = f"""
-Analyze the user question: "{question}"
-Which specialists are needed? Respond ONLY with a comma-separated list of categories:
-'Fundamentals', 'MarketData', 'Sentiment'.
-"""
+    Analyze the user question: "{question}"
+    Determine which financial specialists are required.
+    - 'Fundamentals': For P/E, Market Cap, Sector lookup, or company info.
+    - 'MarketData': For stock prices, % change, performance, or market status.
+    - 'Sentiment': For news and market mood.
+
+    Respond with a comma-separated list. If unsure, include both 'Fundamentals' and 'MarketData'.
+    """
     orch_res = client.chat.completions.create(
         model=model,
         messages=[
