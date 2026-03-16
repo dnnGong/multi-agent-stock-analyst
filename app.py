@@ -107,23 +107,59 @@ def query_local_db(sql: str) -> dict:
         return {"error": str(exc)}
 
 
+# def get_company_overview(ticker: str) -> dict:
+#     # Company fundamentals tool
+#     try:
+#         stock = yf.Ticker(ticker)
+#         info = stock.info
+
+#         pe_ratio = info.get("forwardPE") or info.get("trailingPE")
+#         market_cap = info.get("marketCap")
+#         company_name = info.get("longName") or info.get("shortName")
+
+#         if pe_ratio is None and market_cap is None:
+#             return {"error": f"No fundamental data found for {ticker}"}
+
+#         return {
+#             "ticker": ticker,
+#             "name": company_name if company_name else "N/A",
+#             "pe_ratio": round(pe_ratio, 2) if pe_ratio else "N/A",
+#             "market_cap": market_cap if market_cap else "N/A",
+#         }
+#     except Exception as exc:
+#         return {"error": f"Error fetching data for {ticker}: {str(exc)}"}
+
 def get_company_overview(ticker: str) -> dict:
-    # Company fundamentals tool
+    # Company fundamentals tool using Alpha Vantage instead of yfinance
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        url = f"https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={ALPHAVANTAGE_API_KEY}"
+        response = requests.get(url, timeout=15)
+        data = response.json()
 
-        pe_ratio = info.get("forwardPE") or info.get("trailingPE")
-        market_cap = info.get("marketCap")
-        company_name = info.get("longName") or info.get("shortName")
+        # 处理 Alpha Vantage 的 API 调用频率限制 (Rate Limit) 提示
+        if "Information" in data and "rate limit" in data["Information"].lower():
+            return {"error": "Alpha Vantage API rate limit reached. Please try again later."}
 
-        if pe_ratio is None and market_cap is None:
-            return {"error": f"No fundamental data found for {ticker}"}
+        # 如果返回的数据没有 Symbol，说明 Ticker 无效或没查到数据
+        if not data or "Symbol" not in data:
+            return {"error": f"No fundamental data found for {ticker}. The ticker might be invalid."}
+
+        pe_ratio = data.get("PERatio")
+        market_cap = data.get("MarketCapitalization")
+        company_name = data.get("Name")
+
+        # 安全地格式化 P/E Ratio
+        pe_formatted = "N/A"
+        if pe_ratio and pe_ratio != "None":
+            try:
+                pe_formatted = round(float(pe_ratio), 2)
+            except ValueError:
+                pe_formatted = pe_ratio
 
         return {
-            "ticker": ticker,
+            "ticker": data.get("Symbol", ticker),
             "name": company_name if company_name else "N/A",
-            "pe_ratio": round(pe_ratio, 2) if pe_ratio else "N/A",
+            "pe_ratio": pe_formatted,
             "market_cap": market_cap if market_cap else "N/A",
         }
     except Exception as exc:
