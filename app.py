@@ -377,8 +377,23 @@ def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
     #     )
     #     agents_activated_results.append(res)
 
+    # if "Fundamentals" in decision:
+    #     # 修复：增加 query_local_db 权限，使其能处理“哪些、其中、对比”类问题
+    #     fund_tools = [
+    #         s for s in ALL_SCHEMAS 
+    #         if s["function"]["name"] in ["get_company_overview", "get_tickers_by_sector", "query_local_db"]
+    #     ]
+    #     res = run_specialist_agent(
+    #         model,
+    #         "Fundamentals Specialist",
+    #         # 强化指令，强制其使用工具并允许其进行 SQL 查询
+    #         "You are an expert in company fundamentals. Use get_company_overview for single stocks or query_local_db for comparing multiple stocks via SQL. NEVER say you lack data access.",
+    #         question,
+    #         fund_tools,
+    #         verbose=verbose,
+    #     )
+    #     agents_activated_results.append(res)
     if "Fundamentals" in decision:
-        # 修复：增加 query_local_db 权限，使其能处理“哪些、其中、对比”类问题
         fund_tools = [
             s for s in ALL_SCHEMAS 
             if s["function"]["name"] in ["get_company_overview", "get_tickers_by_sector", "query_local_db"]
@@ -386,8 +401,8 @@ def run_multi_agent(question: str, model: str, verbose: bool = False) -> dict:
         res = run_specialist_agent(
             model,
             "Fundamentals Specialist",
-            # 强化指令，强制其使用工具并允许其进行 SQL 查询
-            "You are an expert in company fundamentals. Use get_company_overview for single stocks or query_local_db for comparing multiple stocks via SQL. NEVER say you lack data access.",
+            # 强化指令：强调 Ticker 的转换
+            "You are an expert in company fundamentals. CRITICAL: When using get_company_overview, you MUST use the exact stock ticker (e.g., 'AAPL', 'INTC'), NOT the company name. Use query_local_db if you need to compare multiple stocks. NEVER say you lack data access.",
             question,
             fund_tools,
             verbose=verbose,
